@@ -19,6 +19,31 @@ Run
     ANTHROPIC_API_KEY=sk-ant-... python main.py
     # or create a .env file and run:
     python main.py
+
+    # Custom OpenAI-compatible endpoint (e.g. Ollama, LM Studio):
+    LLM_BASE_URL=http://localhost:11434/v1 LLM_API_KEY=ollama LLM_MODEL_NAME=llama3.2 python main.py
+
+    # Override model name only (uses existing ANTHROPIC_API_KEY / OPENAI_API_KEY):
+    LLM_MODEL_NAME=anthropic:claude-3-opus-20240229 python main.py
+
+LLM configuration environment variables
+----------------------------------------
+``LLM_API_KEY``
+    API key for the model.  When set together with ``LLM_BASE_URL`` a
+    :class:`~langchain_openai.ChatOpenAI` is created with the supplied key so
+    it works with any OpenAI-compatible endpoint.
+
+``LLM_BASE_URL``
+    Base URL for the LLM API (e.g. ``http://localhost:11434/v1`` for Ollama).
+    Setting this automatically switches to a custom :class:`~langchain_openai.ChatOpenAI`
+    instance regardless of whether ``LLM_API_KEY`` is set.
+
+``LLM_MODEL_NAME``
+    Model name to use.  Accepts a bare model name (``gpt-4o``) when combined
+    with a custom endpoint, or a provider-prefixed string
+    (``anthropic:claude-3-opus-20240229``, ``openai:gpt-4o``) when relying on
+    standard provider API keys.  Defaults to ``gpt-4o-mini`` for custom
+    endpoints and the provider's built-in default otherwise.
 """
 
 from __future__ import annotations
@@ -44,8 +69,42 @@ def _separator(title: str) -> None:
     print(f"{'=' * width}")
 
 
-def _pick_model() -> str | None:
-    """Return a model identifier based on available API keys, or None."""
+def _pick_model():
+    """Return a model identifier or configured ChatOpenAI instance, or None.
+
+    Resolution order
+    ----------------
+    1. **Custom OpenAI-compatible endpoint** – when ``LLM_BASE_URL`` or
+       ``LLM_API_KEY`` is set a :class:`~langchain_openai.ChatOpenAI` instance is
+       returned so that custom ``base_url`` / ``api_key`` values can be forwarded.
+       ``LLM_MODEL_NAME`` is used as the model name (defaults to ``gpt-4o-mini``).
+    2. **Model name override** – when only ``LLM_MODEL_NAME`` is set (e.g.
+       ``anthropic:claude-3-opus`` or ``openai:gpt-4o``) it is returned as a plain
+       string and the provider SDK picks up its key from the standard env var
+       (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY``).
+    3. **Standard keys** – fall back to ``ANTHROPIC_API_KEY`` →
+       ``claude-3-5-haiku-latest``, then ``OPENAI_API_KEY`` → ``gpt-4o-mini``.
+    """
+    custom_base_url = os.getenv("LLM_BASE_URL", "").strip()
+    custom_api_key = os.getenv("LLM_API_KEY", "").strip()
+    custom_model_name = os.getenv("LLM_MODEL_NAME", "").strip()
+
+    # ── 1. Custom OpenAI-compatible endpoint ──────────────────────────────────
+    if custom_base_url or custom_api_key:
+        from langchain_openai import ChatOpenAI
+
+        kwargs: dict = {"model": custom_model_name or "gpt-4o-mini"}
+        if custom_api_key:
+            kwargs["api_key"] = custom_api_key
+        if custom_base_url:
+            kwargs["base_url"] = custom_base_url
+        return ChatOpenAI(**kwargs)
+
+    # ── 2. Model name override (provider string, e.g. "openai:gpt-4o") ────────
+    if custom_model_name:
+        return custom_model_name
+
+    # ── 3. Standard provider API keys ─────────────────────────────────────────
     if os.getenv("ANTHROPIC_API_KEY"):
         return "anthropic:claude-3-5-haiku-latest"
     openai_key = os.getenv("OPENAI_API_KEY", "")
@@ -133,15 +192,19 @@ def demo_deep_agent_invocation(skills: list[Skill]) -> None:
     their SKILL.md instructions at runtime.  The Python tool implementations
     are passed directly as the agent's tool list.
     """
-    _separator("Part 2: Deep Agent Invocation (requires ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+    _separator("Part 2: Deep Agent Invocation (requires an LLM API key)")
 
     model = _pick_model()
     if model is None:
         print(
             "\n  No LLM API key found – skipping deep-agent demo.\n"
-            "  Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment or .env file."
+            "  Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment or .env file,\n"
+            "  or configure a custom model via LLM_API_KEY / LLM_BASE_URL / LLM_MODEL_NAME."
         )
         return
+
+    model_label = getattr(model, "model_name", None) or str(model)
+    print(f"\n  Using model: {model_label}")
 
     try:
         from deepagents import create_deep_agent
