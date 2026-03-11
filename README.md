@@ -1,8 +1,8 @@
-# LangChain Skill Demo
+# LangChain Deep Agent Skill Demo
 
-A Python demo that shows how to define, load, and execute **skills** using the
-[Agent Skills specification](https://agentskills.io/specification) together with
-the LangChain / LangGraph stack.
+A Python demo that shows how to define and run **true skills** using the
+[deepagents](https://docs.langchain.com/oss/python/deepagents/overview) library
+together with the [Agent Skills specification](https://agentskills.io/specification).
 
 Each skill is a **self-contained directory** under `skills/` that contains:
 
@@ -26,11 +26,42 @@ skill_demo/
 │   └── weather/
 │       ├── SKILL.md
 │       └── weather.py        # tools: get_weather, list_supported_cities
-├── skill_loader.py           # skill discovery, SKILL.md parsing, tool loading
+├── skill_loader.py           # skill discovery, SKILL.md parsing, store loading
 ├── main.py                   # demo entry point
 ├── requirements.txt
 └── .env.example
 ```
+
+## How it works – the deepagents skill integration
+
+```
+┌─────────────────────────────────────────────┐
+│            InMemoryStore                    │
+│  namespace: ("filesystem",)                 │
+│  ┌──────────────────────────────────────┐   │
+│  │ /skills/calculator/SKILL.md          │   │
+│  │ /skills/text/SKILL.md               │   │
+│  │ /skills/weather/SKILL.md            │   │
+│  └──────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
+          ↕ StoreBackend reads/writes
+┌─────────────────────────────────────────────┐
+│      create_deep_agent(                     │
+│          backend = StoreBackend,            │
+│          store   = InMemoryStore,           │
+│          skills  = ["/skills/"],            │
+│          tools   = [add, subtract, …],      │
+│      )                                      │
+└─────────────────────────────────────────────┘
+```
+
+1. `load_skills_into_store(store)` reads every `SKILL.md` from disk and puts
+   it into the `InMemoryStore` under namespace `("filesystem",)`.
+2. `create_deep_agent` receives a `StoreBackend` factory and the `InMemoryStore`.
+   Its `SkillsMiddleware` reads the `SKILL.md` files at startup and injects the
+   skill instructions into the agent's system prompt.
+3. The Python tool implementations (e.g. `add`, `get_weather`) are passed as
+   `tools=` so the agent can call them to fulfill skill-guided requests.
 
 ## SKILL.md format
 
@@ -65,13 +96,13 @@ naming rules (lowercase alphanumeric + hyphens, max 64 chars).
 pip install -r requirements.txt
 ```
 
-### 2 – (Optional) Configure an OpenAI API key
+### 2 – (Optional) Configure an LLM API key
 
-Copy `.env.example` to `.env` and fill in your key to enable the agent demo:
+Copy `.env.example` to `.env` and fill in your key to enable the deep-agent demo:
 
 ```bash
 cp .env.example .env
-# edit .env and set OPENAI_API_KEY=sk-...
+# edit .env – set ANTHROPIC_API_KEY or OPENAI_API_KEY
 ```
 
 The direct invocation demo works **without** any API key.
@@ -84,7 +115,7 @@ python main.py
 
 ## Demo modes
 
-### Part 1 – Direct skill invocation
+### Part 1 – Direct skill invocation (no LLM)
 
 Skills are loaded, their `SKILL.md` metadata is displayed, and then tools are
 invoked directly by name — no LLM in the loop.
@@ -105,35 +136,49 @@ Loaded 3 skill(s):
      Tools: get_weather, list_supported_cities
 
 Calculator skill examples
-  add(a=12, b=8) = 20
-  multiply(a=6, b=7) = 42
+  add(a=12, b=8) = 20.0
+  multiply(a=6, b=7) = 42.0
   square_root(x=144) = 12.0
-
-Text skill examples
-  to_uppercase: HELLO, WORLD! …
-  extract_emails: ['hello@example.com', 'support@demo.org']
-
-Weather skill examples
-  Weather in Beijing: Sunny, 22°C, humidity 40%.
 ```
 
-### Part 2 – Agent-based skill invocation (requires `OPENAI_API_KEY`)
+### Part 2 – Deep-agent skill invocation (requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
 
-A LangGraph ReAct agent is given the full tool list and answers natural-language
-questions by automatically choosing which tools to call.
+Skills are loaded into an `InMemoryStore`, a `deepagents` deep agent is created
+with `StoreBackend`, and natural-language questions are answered using the skill
+tools.
 
-```
-Question: What is the square root of 256, and what is 13 multiplied by 7?
-Answer:   The square root of 256 is 16 and 13 × 7 = 91.
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import StoreBackend
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
+from skill_loader import load_skills, load_skills_into_store, load_tools
+
+store = InMemoryStore()
+load_skills_into_store(store)          # populate SKILL.md files
+
+agent = create_deep_agent(
+    model="anthropic:claude-3-5-haiku-latest",
+    tools=load_tools(),                # Python @tool implementations
+    backend=(lambda rt: StoreBackend(rt)),
+    store=store,
+    skills=["/skills/"],              # where SKILL.md files live in the store
+    checkpointer=MemorySaver(),
+)
+
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "What is 13 × 7?"}]},
+    config={"configurable": {"thread_id": "my-thread"}},
+)
 ```
 
 ## Adding a new skill
 
 1. Create a new directory `skills/my-skill/`.
-2. Add `skills/my-skill/SKILL.md` with the required YAML front-matter
-   (see format above).
-3. Add `skills/my-skill/my_skill.py` and decorate each function with
-   `@tool` from `langchain_core.tools`.
+2. Add `skills/my-skill/SKILL.md` with the required YAML front-matter.
+3. Add `skills/my-skill/my_skill.py` with `@tool`-decorated functions.
+
+The skill loader discovers all directories automatically — no other changes needed.
 
 ```
 skills/my-skill/
@@ -141,27 +186,13 @@ skills/my-skill/
 └── my_skill.py    # @tool functions
 ```
 
-The skill loader discovers all directories automatically on the next run —
-no other changes needed.
-
-```python
-# skills/my-skill/my_skill.py
-from langchain_core.tools import tool
-
-@tool
-def greet(name: str) -> str:
-    """Return a personalised greeting."""
-    return f"Hello, {name}!"
-```
-
 ## Key dependencies
 
 | Package | Version |
 |---|---|
+| `deepagents` | ≥ 0.4.0 |
+| `langgraph` | ≥ 0.3.0 |
 | `langchain` | ≥ 1.2 |
 | `langchain-core` | ≥ 1.2 |
-| `langchain-community` | ≥ 0.4 |
 | `PyYAML` | ≥ 6.0 |
-| `langchain-openai` | ≥ 1.1 (agent demo only) |
-| `langgraph` | ≥ 1.1 (agent demo only) |
-
+| `langchain-openai` | ≥ 1.1 (OpenAI model support) |

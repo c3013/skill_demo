@@ -1,10 +1,10 @@
-"""main.py – LangChain skill invocation demo.
+"""main.py – LangChain Deep Agent skill demo.
 
 Demonstrates two modes:
 1. **Direct invocation** – call individual tools directly without an LLM.
-2. **Agent-based invocation** – an LLM-powered ReAct agent selects and calls
-   the right tools automatically (requires OPENAI_API_KEY in the environment
-   or a .env file).
+2. **Deep-agent invocation** – a ``deepagents`` deep agent loads each skill's
+   ``SKILL.md`` from a LangGraph ``InMemoryStore`` (via ``StoreBackend``) and
+   uses the skill tools to answer questions.  Requires an LLM API key.
 
 Each skill lives in its own sub-directory under ``skills/`` and is described
 by a ``SKILL.md`` file that follows the Agent Skills specification
@@ -15,9 +15,9 @@ Run
     # Direct invocation only (no API key needed):
     python main.py
 
-    # Agent-based invocation (needs OPENAI_API_KEY):
-    OPENAI_API_KEY=sk-... python main.py
-    # or create a .env file with OPENAI_API_KEY=sk-... and run:
+    # Deep-agent invocation (needs ANTHROPIC_API_KEY or OPENAI_API_KEY):
+    ANTHROPIC_API_KEY=sk-ant-... python main.py
+    # or create a .env file and run:
     python main.py
 """
 
@@ -28,7 +28,7 @@ import os
 from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 
-from skill_loader import Skill, load_skills, load_tools
+from skill_loader import Skill, load_skills, load_skills_into_store, load_tools
 
 load_dotenv()  # reads .env if present
 
@@ -42,6 +42,16 @@ def _separator(title: str) -> None:
     print(f"\n{'=' * width}")
     print(f"  {title}")
     print(f"{'=' * width}")
+
+
+def _pick_model() -> str | None:
+    """Return a model identifier based on available API keys, or None."""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "anthropic:claude-3-5-haiku-latest"
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if openai_key.startswith("sk-") and not openai_key.startswith("sk-placeholder"):
+        return "openai:gpt-4o-mini"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -113,44 +123,79 @@ def demo_direct_invocation(skills: list[Skill]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Part 2 – agent-based invocation (requires an LLM)
+# Part 2 – deep-agent invocation (requires an LLM API key)
 # ---------------------------------------------------------------------------
 
-def demo_agent_invocation(skills: list[Skill]) -> None:
-    """Use a LangGraph ReAct agent to answer questions using the loaded skills."""
-    _separator("Part 2: Agent-Based Skill Invocation (requires OPENAI_API_KEY)")
+def demo_deep_agent_invocation(skills: list[Skill]) -> None:
+    """Create a deep agent backed by StoreBackend + InMemoryStore and run a demo query.
 
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key or api_key.startswith("sk-placeholder"):
+    Skills are loaded into the store so the agent's SkillsMiddleware can read
+    their SKILL.md instructions at runtime.  The Python tool implementations
+    are passed directly as the agent's tool list.
+    """
+    _separator("Part 2: Deep Agent Invocation (requires ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
+    model = _pick_model()
+    if model is None:
         print(
-            "\n  OPENAI_API_KEY not set – skipping agent demo.\n"
-            "  Set OPENAI_API_KEY in your environment or in a .env file to enable it."
+            "\n  No LLM API key found – skipping deep-agent demo.\n"
+            "  Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your environment or .env file."
         )
         return
 
     try:
-        from langchain_openai import ChatOpenAI
-        from langgraph.prebuilt import create_react_agent
+        from deepagents import create_deep_agent
+        from deepagents.backends import StoreBackend
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.store.memory import InMemoryStore
     except ImportError as exc:
-        print(f"\n  Missing dependency: {exc}. Run: pip install langchain-openai langgraph")
+        print(f"\n  Missing dependency: {exc}. Run: pip install deepagents langgraph")
         return
 
-    all_tools: list[BaseTool] = [tool for skill in skills for tool in skill.tools]
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    agent = create_react_agent(llm, all_tools)
+    # ── 1. Create a LangGraph store and populate it with each skill's SKILL.md ──
+    store = InMemoryStore()
+    skill_keys = load_skills_into_store(store, skills_root="/skills/")
+    print(f"\n  Loaded {len(skill_keys)} skill(s) into InMemoryStore:")
+    for key in skill_keys:
+        print(f"    • {key}")
 
+    # ── 2. Collect all tool implementations from the skill Python modules ──
+    all_tools: list[BaseTool] = [tool for skill in skills for tool in skill.tools]
+
+    # ── 3. Create the deep agent ──
+    #   • backend  – StoreBackend reads/writes files from the InMemoryStore
+    #   • store    – the InMemoryStore populated with SKILL.md files above
+    #   • skills   – virtual path prefix where skill directories live in the store
+    #   • tools    – the actual @tool implementations from our skill .py modules
+    #   • checkpointer – MemorySaver enables thread-based conversation history
+    checkpointer = MemorySaver()
+    agent = create_deep_agent(
+        model=model,
+        tools=all_tools,
+        backend=(lambda rt: StoreBackend(rt)),
+        store=store,
+        skills=["/skills/"],
+        checkpointer=checkpointer,
+    )
+
+    # ── 4. Ask the agent questions that exercise the skills ──
     questions = [
-        "What is the square root of 256, and what is 13 multiplied by 7?",
-        "How many words are in the sentence 'The quick brown fox jumps over the lazy dog'?",
-        "What is the weather like in Tokyo and Shanghai right now?",
+        "What is 13 multiplied by 7, and what is the square root of 256?",
+        "How many words are in 'The quick brown fox jumps over the lazy dog'?",
+        "What is the weather like in Tokyo and Shanghai?",
     ]
 
+    thread_id = "skill-demo-thread"
     for question in questions:
         print(f"\n  Question: {question}")
-        response = agent.invoke({"messages": [("user", question)]})
-        # The final answer is in the last AI message
+        response = agent.invoke(
+            {"messages": [{"role": "user", "content": question}]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
         final = response["messages"][-1].content
-        print(f"  Answer:   {final}")
+        # Trim very long responses for readability
+        preview = final if len(final) <= 300 else final[:300] + " …"
+        print(f"  Answer:   {preview}")
 
 
 # ---------------------------------------------------------------------------
@@ -158,16 +203,16 @@ def demo_agent_invocation(skills: list[Skill]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    print("\n🔧 LangChain Skill Demo – loading skills …")
+    print("\n🔧 LangChain Deep Agent Skill Demo – loading skills …")
 
     # Load all skills from the skills/ directory (each skill has a SKILL.md)
     skills = load_skills()
 
-    # Part 1: direct invocation (always runs)
+    # Part 1: direct invocation (always runs, no LLM needed)
     demo_direct_invocation(skills)
 
-    # Part 2: agent invocation (runs only when OPENAI_API_KEY is available)
-    demo_agent_invocation(skills)
+    # Part 2: deep-agent invocation (requires an LLM API key)
+    demo_deep_agent_invocation(skills)
 
     _separator("Demo complete")
     print()

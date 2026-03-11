@@ -38,15 +38,20 @@ SKILL.md format
 
 Usage
 -----
-    from skill_loader import load_skills, SkillMetadata
+    from skill_loader import load_skills, load_tools, load_skills_into_store
 
     skills = load_skills()                   # load every skill
     skills = load_skills(["calculator"])     # load only the calculator skill
 
     for skill in skills:
-        print(skill.metadata["name"], "–", skill.metadata["description"])
+        print(skill.metadata.name, "–", skill.metadata.description)
         for tool in skill.tools:
             print("  •", tool.name)
+
+    # Load SKILL.md files into a LangGraph BaseStore for use with create_deep_agent:
+    from langgraph.store.memory import InMemoryStore
+    store = InMemoryStore()
+    load_skills_into_store(store)
 """
 
 from __future__ import annotations
@@ -58,10 +63,13 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import yaml
 from langchain_core.tools import BaseTool
+
+if TYPE_CHECKING:
+    from langgraph.store.base import BaseStore
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +83,9 @@ _MAX_SKILL_DESCRIPTION_LENGTH = 1024
 # SkillMetadata keys as defined by the Agent Skills specification
 _REQUIRED_FRONTMATTER_KEYS = ("name", "description")
 
+# Namespace used by StoreBackend when no explicit namespace factory is set
+_STORE_NAMESPACE = ("filesystem",)
+
 
 @dataclass
 class SkillMetadata:
@@ -87,7 +98,7 @@ class SkillMetadata:
     """Skill identifier (max 64 chars, lowercase alphanumeric and hyphens)."""
 
     description: str
-    """What the skill does and when to use it (max 1 024 chars)."""
+    """What the skill does and when to use it (max 1024 chars)."""
 
     path: str
     """Absolute path to the ``SKILL.md`` file."""
@@ -187,9 +198,9 @@ def _parse_skill_md(skill_md_path: Path) -> Optional[SkillMetadata]:
 
     raw_tools = data.get("allowed-tools")
     if isinstance(raw_tools, list):
-        allowed_tools = [str(t).strip(",") for t in raw_tools if str(t).strip(",")]
+        allowed_tools = [name for t in raw_tools if (name := str(t).strip(","))]
     elif isinstance(raw_tools, str):
-        allowed_tools = [t.strip(",") for t in raw_tools.split() if t.strip(",")]
+        allowed_tools = [name for t in raw_tools.split() if (name := t.strip(","))]
     else:
         allowed_tools = []
 
@@ -292,3 +303,80 @@ def load_tools(names: Optional[list[str]] = None) -> list[BaseTool]:
         Optional list of skill names to load (see :func:`load_skills`).
     """
     return [tool for skill in load_skills(names) for tool in skill.tools]
+
+
+def load_skills_into_store(
+    store: "BaseStore",
+    names: Optional[list[str]] = None,
+    *,
+    skills_root: str = "/skills/",
+    namespace: tuple[str, ...] = _STORE_NAMESPACE,
+) -> list[str]:
+    """Read each skill's ``SKILL.md`` from disk and store it in a LangGraph ``BaseStore``.
+
+    This is the integration point between the local skill directory layout and the
+    ``deepagents`` :class:`~deepagents.backends.StoreBackend`.  After calling this
+    function you can pass ``skills=[skills_root]`` to
+    :func:`~deepagents.graph.create_deep_agent` and the deep agent will pick up the
+    skills via ``SkillsMiddleware``.
+
+    Parameters
+    ----------
+    store:
+        A LangGraph :class:`~langgraph.store.base.BaseStore` instance (e.g.
+        :class:`~langgraph.store.memory.InMemoryStore`).
+    names:
+        Optional list of skill *directory names* to load.  Defaults to all skills.
+    skills_root:
+        POSIX path prefix used as the virtual root for skill files inside the
+        store.  Defaults to ``"/skills/"``.  Must end with ``"/"``.
+    namespace:
+        Store namespace tuple.  Defaults to ``("filesystem",)`` which matches
+        the default namespace used by
+        :class:`~deepagents.backends.StoreBackend`.
+
+    Returns
+    -------
+    list[str]
+        List of store keys (virtual POSIX paths) that were written, e.g.
+        ``["/skills/calculator/SKILL.md", "/skills/text/SKILL.md"]``.
+    """
+    from deepagents.backends.utils import create_file_data
+
+    if not skills_root.endswith("/"):
+        skills_root = skills_root + "/"
+
+    if not _SKILLS_DIR.is_dir():
+        logger.warning("Skills directory not found: %s", _SKILLS_DIR)
+        return []
+
+    written: list[str] = []
+
+    for skill_dir in sorted(_SKILLS_DIR.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_md_path = skill_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            continue
+
+        if names is not None and skill_dir.name not in names:
+            continue
+
+        try:
+            content = skill_md_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Cannot read %s: %s", skill_md_path, exc)
+            continue
+
+        # Virtual path inside the store, e.g. "/skills/calculator/SKILL.md"
+        store_key = f"{skills_root}{skill_dir.name}/SKILL.md"
+
+        store.put(
+            namespace=namespace,
+            key=store_key,
+            value=create_file_data(content),
+        )
+        written.append(store_key)
+        logger.debug("Loaded skill into store: %s", store_key)
+
+    return written
