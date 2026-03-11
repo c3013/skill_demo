@@ -1,5 +1,7 @@
 """Text skill – common string manipulation operations."""
 
+import re
+
 from langchain_core.tools import tool
 
 
@@ -30,6 +32,5 @@ def reverse_text(text: str) -> str:
 @tool
 def extract_emails(text: str) -> list:
     """Extract all email addresses found in the provided text."""
-    import re
     pattern = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
     return re.findall(pattern, text)

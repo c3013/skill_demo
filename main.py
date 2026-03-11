@@ -6,6 +6,10 @@ Demonstrates two modes:
    the right tools automatically (requires OPENAI_API_KEY in the environment
    or a .env file).
 
+Each skill lives in its own sub-directory under ``skills/`` and is described
+by a ``SKILL.md`` file that follows the Agent Skills specification
+(https://agentskills.io/specification).
+
 Run
 ---
     # Direct invocation only (no API key needed):
@@ -24,7 +28,7 @@ import os
 from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 
-from skill_loader import load_skills
+from skill_loader import Skill, load_skills, load_tools
 
 load_dotenv()  # reads .env if present
 
@@ -44,17 +48,29 @@ def _separator(title: str) -> None:
 # Part 1 – direct skill invocation
 # ---------------------------------------------------------------------------
 
-def demo_direct_invocation(tools: list[BaseTool]) -> None:
-    """Show each tool's metadata and invoke a representative subset directly."""
+def demo_direct_invocation(skills: list[Skill]) -> None:
+    """Show each skill's SKILL.md metadata and invoke a representative subset directly."""
     _separator("Part 1: Direct Skill Invocation (no LLM required)")
 
-    print(f"\nLoaded {len(tools)} skill(s):\n")
-    for tool in tools:
-        print(f"  • {tool.name:<25} – {tool.description}")
+    all_tools: list[BaseTool] = [tool for skill in skills for tool in skill.tools]
+
+    print(f"\nLoaded {len(skills)} skill(s):\n")
+    for skill in skills:
+        meta = skill.metadata
+        annotation_parts = []
+        if meta.license:
+            annotation_parts.append(f"License: {meta.license}")
+        if meta.compatibility:
+            annotation_parts.append(f"Compatibility: {meta.compatibility}")
+        annotation = f"  [{', '.join(annotation_parts)}]" if annotation_parts else ""
+        print(f"  📦 {meta.name}{annotation}")
+        print(f"     {meta.description}")
+        print(f"     Tools: {', '.join(t.name for t in skill.tools)}")
+        print()
 
     # --- Calculator demos ---
     _separator("Calculator skill examples")
-    by_name: dict[str, BaseTool] = {t.name: t for t in tools}
+    by_name: dict[str, BaseTool] = {t.name: t for t in all_tools}
 
     cases = [
         ("add",         {"a": 12, "b": 8}),
@@ -100,7 +116,7 @@ def demo_direct_invocation(tools: list[BaseTool]) -> None:
 # Part 2 – agent-based invocation (requires an LLM)
 # ---------------------------------------------------------------------------
 
-def demo_agent_invocation(tools: list[BaseTool]) -> None:
+def demo_agent_invocation(skills: list[Skill]) -> None:
     """Use a LangGraph ReAct agent to answer questions using the loaded skills."""
     _separator("Part 2: Agent-Based Skill Invocation (requires OPENAI_API_KEY)")
 
@@ -119,8 +135,9 @@ def demo_agent_invocation(tools: list[BaseTool]) -> None:
         print(f"\n  Missing dependency: {exc}. Run: pip install langchain-openai langgraph")
         return
 
+    all_tools: list[BaseTool] = [tool for skill in skills for tool in skill.tools]
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    agent = create_react_agent(llm, tools)
+    agent = create_react_agent(llm, all_tools)
 
     questions = [
         "What is the square root of 256, and what is 13 multiplied by 7?",
@@ -143,14 +160,14 @@ def demo_agent_invocation(tools: list[BaseTool]) -> None:
 def main() -> None:
     print("\n🔧 LangChain Skill Demo – loading skills …")
 
-    # Load all skills from the skills/ package
-    tools = load_skills()
+    # Load all skills from the skills/ directory (each skill has a SKILL.md)
+    skills = load_skills()
 
     # Part 1: direct invocation (always runs)
-    demo_direct_invocation(tools)
+    demo_direct_invocation(skills)
 
     # Part 2: agent invocation (runs only when OPENAI_API_KEY is available)
-    demo_agent_invocation(tools)
+    demo_agent_invocation(skills)
 
     _separator("Demo complete")
     print()

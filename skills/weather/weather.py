@@ -1,6 +1,7 @@
 """Weather skill – mock weather lookup (no external API required)."""
 
 import random
+
 from langchain_core.tools import tool
 
 # Simulated weather data so the demo runs without any external API key.
